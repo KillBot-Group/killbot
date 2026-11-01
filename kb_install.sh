@@ -433,7 +433,7 @@ kb_install_patched_php() {
 }
 
 # Distro nginx on Ubuntu 22.04 is 1.18 (critical CVEs). Official stable is 1.30.x
-# and still accepts listen ... ssl http2. Skip if already 1.26+.
+# (http2 on; not listen ... ssl http2). Skip if already 1.26+.
 kb_nginx_version() {
     nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
 }
@@ -613,7 +613,8 @@ sudo apt update -y
 sudo apt install -y apache2 software-properties-common ca-certificates gnupg
 kb_install_patched_php
 
-sudo chown -R www-data:www-data /var/www/html
+# ping.txt exists only after a successful health check; it may be absent.
+sudo chown -R -h www-data:www-data /var/www/html 2>&1 | grep -vF 'ping.txt' || true
 
 sudo a2enmod ssl
 sudo a2enmod rewrite
@@ -1159,7 +1160,8 @@ server {
     }
 }
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name $CURRENT_SERVER_IP;
 
     ssl_certificate      /etc/ssl/certs/ssl-cert-snakeoil.pem;
@@ -1909,46 +1911,82 @@ FILE="/opt/killbot/backup_restore.sh"
         exit 1
     fi
 
-sudo chmod +x /opt/killbot/check_killbot_reverse_proxy.sh /opt/killbot/setup_killbot_reverse_proxy.sh /opt/killbot/update-postrouting.sh /opt/killbot/update-symmetric-ip.sh /opt/killbot/check_host_curl.sh /opt/killbot/read_apache_log.sh /opt/killbot/backup_send.sh /opt/killbot/backup_restore.sh
-sudo chown root:root /opt/killbot/check_host_curl.sh /opt/killbot/read_apache_log.sh
-sudo chmod 755 /opt/killbot/check_host_curl.sh /opt/killbot/read_apache_log.sh
-sudo chmod 644 /opt/killbot/dns_provider_hint.sh
-
-sudo chown www-data:www-data /opt/killbot/html/FakeBot.php /opt/killbot/html/BlockBot.html /opt/killbot/html/Expired.html /opt/killbot/html/verification.php /opt/killbot/html/verification_options.php /opt/killbot/html/verification_options_example.php
-sudo chmod +x /opt/killbot/f2b/subnet-monitor.sh /opt/killbot/UpdateAll.sh /opt/killbot/official_allowed_ips.sh
+echo "Setting permissions on KillBot scripts..."
+for f in \
+    /opt/killbot/check_killbot_reverse_proxy.sh \
+    /opt/killbot/setup_killbot_reverse_proxy.sh \
+    /opt/killbot/update-postrouting.sh \
+    /opt/killbot/update-symmetric-ip.sh \
+    /opt/killbot/check_host_curl.sh \
+    /opt/killbot/read_apache_log.sh \
+    /opt/killbot/backup_send.sh \
+    /opt/killbot/backup_restore.sh \
+    /opt/killbot/f2b/subnet-monitor.sh \
+    /opt/killbot/UpdateAll.sh \
+    /opt/killbot/official_allowed_ips.sh \
+    /opt/killbot/cert_delete.sh \
+    /opt/killbot/f2b/block_all_countries_except.sh \
+    /opt/killbot/f2b/check_apache_and_block.sh \
+    /opt/killbot/f2b/unblock_traffic.sh
+do
+    if [ -e "$f" ]; then
+        sudo chmod +x "$f" || true
+    fi
+done
+if [ -e /opt/killbot/check_host_curl.sh ]; then
+    sudo chown root:root /opt/killbot/check_host_curl.sh || true
+    sudo chmod 755 /opt/killbot/check_host_curl.sh || true
+fi
+if [ -e /opt/killbot/read_apache_log.sh ]; then
+    sudo chown root:root /opt/killbot/read_apache_log.sh || true
+    sudo chmod 755 /opt/killbot/read_apache_log.sh || true
+fi
+if [ -e /opt/killbot/dns_provider_hint.sh ]; then
+    sudo chmod 644 /opt/killbot/dns_provider_hint.sh || true
+fi
+for f in \
+    /opt/killbot/html/FakeBot.php \
+    /opt/killbot/html/BlockBot.html \
+    /opt/killbot/html/Expired.html \
+    /opt/killbot/html/verification.php \
+    /opt/killbot/html/verification_options.php \
+    /opt/killbot/html/verification_options_example.php
+do
+    if [ -e "$f" ]; then
+        sudo chown www-data:www-data "$f" || true
+    fi
+done
 rm -f /opt/killbot/acme_check_api.sh /opt/killbot/renew_wildcard.sh /opt/killbot/update.sh /etc/cron.d/killbot-wildcard-renewal
-sudo chmod +x /opt/killbot/cert_delete.sh /opt/killbot/f2b/block_all_countries_except.sh /opt/killbot/f2b/check_apache_and_block.sh /opt/killbot/f2b/unblock_traffic.sh
+echo "Writing kb.lua and site templates..."
 
-sudo tee /opt/killbot/kbEqual.php > /dev/null <<EOF
+cat > /opt/killbot/kbEqual.php <<'KB_EQUAL_EOF'
 #!/usr/bin/php
 <?php
 
-\$stdin = fopen("php://stdin", "r");
-\$logFile = '/var/log/killbot/kbEqual.log';
+$stdin = fopen("php://stdin", "r");
+$logFile = '/var/log/killbot/kbEqual.log';
 
-while ((\$line = fgets(\$stdin)) !== false) {
-    \$line = trim(\$line);
-    if (empty(\$line)) {
+while (($line = fgets($stdin)) !== false) {
+    $line = trim($line);
+    if (empty($line)) {
         continue;
     }
-    list(\$value1, \$value2) = explode('.', \$line);
-    echo (strcmp(\$value1, \$value2) === 0) ? "true\n" : "false\n";
+    list($value1, $value2) = explode('.', $line);
+    echo (strcmp($value1, $value2) === 0) ? "true\n" : "false\n";
     fflush(STDOUT);
 }
 
-fclose(\$stdin);
-EOF
-
-sudo chmod +x /opt/killbot/kbEqual.php
+fclose($stdin);
+KB_EQUAL_EOF
+chmod +x /opt/killbot/kbEqual.php
 
 # Package paths need shell expansion. Quote the rest so $(...) in comments
 # is not executed as command substitution.
-sudo sudo tee /opt/killbot/kb.lua > /dev/null <<KB_LUA_HEAD
+cat > /opt/killbot/kb.lua <<EOF
 package.path = "${KB_LUA_PATH}" .. package.path
 package.cpath = "${KB_LUA_CPATH}" .. package.cpath
-KB_LUA_HEAD
-
-sudo sudo tee -a /opt/killbot/kb.lua > /dev/null <<'KB_LUA_BODY'
+EOF
+cat >> /opt/killbot/kb.lua <<'KB_LUA_BODY'
 
 local md5 = require "md5"
 
@@ -2531,8 +2569,7 @@ end
 
 KB_LUA_BODY
 
-
-sudo tee /opt/killbot/nginx_custom.conf > /dev/null <<'EOF'
+cat > /opt/killbot/nginx_custom.conf <<'EOF'
 # Per-site KillBot proxy options.
 # Copy to /opt/killbot/settings/{domain}/nginx_custom.conf and uncomment
 # lines to override defaults for that site. install.sh does not overwrite
@@ -2557,9 +2594,9 @@ sudo tee /opt/killbot/nginx_custom.conf > /dev/null <<'EOF'
 
 # proxy_ssl_verify off;
 EOF
-sudo chmod 644 /opt/killbot/nginx_custom.conf
+chmod 644 /opt/killbot/nginx_custom.conf
 
-sudo tee /opt/killbot/load_nginx_custom_conf.sh > /dev/null <<'EOF'
+cat > /opt/killbot/load_nginx_custom_conf.sh <<'EOF'
 #!/bin/bash
 # Load /opt/killbot/settings/{domain}/nginx_custom.conf without source/eval.
 
@@ -2675,9 +2712,9 @@ load_nginx_custom_conf() {
     done < "$conf"
 }
 EOF
-sudo chmod 644 /opt/killbot/load_nginx_custom_conf.sh
+chmod 644 /opt/killbot/load_nginx_custom_conf.sh
 
-sudo sudo tee /opt/killbot/apache443-killbot.sh > /dev/null <<EOF
+cat > /opt/killbot/apache443-killbot.sh <<EOF
 #!/bin/bash
 
 if [ \$# -ne 8 ]; then
@@ -2736,7 +2773,8 @@ nginXconfigContent="server {
     return 301 https://\\\$host\\\$request_uri;
 }
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name \$domain www.\$domain *.\$domain;
 
     include /etc/nginx/conf.d/killbot-too-many-requests.inc;
@@ -2787,7 +2825,7 @@ server {
 nginXconfigContent+="
         proxy_ssl_server_name on;
         proxy_ssl_name \\\$host;
-        proxy_ssl_verify \$KB_proxy_ssl_verify;
+        proxy_ssl_verify \${KB_proxy_ssl_verify:-off};
 ";
 
 if [  -n "\$cdn_domain" ] && [ \${#cdn_paths_array[@]} -gt 0 ]; then
@@ -3057,10 +3095,10 @@ echo -e "\$configContent" | sudo tee "\$configFile" > /dev/null
 echo "Configuration for \$domain has been created."
 EOF
 
-sudo chmod +x /opt/killbot/apache443-killbot.sh
+chmod +x /opt/killbot/apache443-killbot.sh
 
 
-sudo tee /opt/killbot/apache80_letsencrypt_test.sh > /dev/null <<EOF
+cat > /opt/killbot/apache80_letsencrypt_test.sh <<EOF
 #!/bin/bash
 
 if [ \$# -ne 2 ]; then
@@ -3073,6 +3111,19 @@ backend_ip=\$2
 
 nginXConfigFile="/etc/nginx/sites-available/\$domain.conf"
 
+KB_Header_unset_X_Frame_Options=1
+KB_SSLProxyCheckPeerCN=Off
+KB_SSLProxyCheckPeerName=Off
+KB_SSLProxyCheckPeerExpire=Off
+KB_proxy_ssl_verify=off
+KB_IncludeOptional_modsecurity_crs=0
+if [[ -f /opt/killbot/load_nginx_custom_conf.sh ]]; then
+    # shellcheck disable=SC1091
+    . /opt/killbot/load_nginx_custom_conf.sh
+    load_nginx_custom_conf "\$domain"
+fi
+: "\${KB_proxy_ssl_verify:=off}"
+
 KB_SOLVER_SNIPPET=""
 if [ -f /etc/nginx/snippets/killbot.conf ]; then
     KB_SOLVER_SNIPPET="    include /etc/nginx/snippets/killbot.conf;"
@@ -3081,13 +3132,14 @@ fi
 nginXconfigContent="
 server {    
     listen 80;
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name \$domain www.\$domain *.\$domain;
 
     include /etc/nginx/conf.d/killbot-too-many-requests.inc;
 \$KB_SOLVER_SNIPPET
 
-    if (\\\$server_protocol = "HTTP/1.3") {
+    if (\\\$server_protocol = 'HTTP/1.3') {
         return 403;
     }
 
@@ -3119,7 +3171,7 @@ server {
 
         proxy_ssl_server_name on;
         proxy_ssl_name \\\$host;
-        proxy_ssl_verify \$KB_proxy_ssl_verify;
+        proxy_ssl_verify \${KB_proxy_ssl_verify:-off};
 
         proxy_http_version 1.1;
         proxy_set_header Connection '';
@@ -3215,11 +3267,11 @@ fi
 
 echo "Configuration for \$domain-le has been created."
 EOF
-sudo chmod +x /opt/killbot/apache80_letsencrypt_test.sh      
+chmod +x /opt/killbot/apache80_letsencrypt_test.sh
 
 
 
-sudo tee /opt/killbot/apache443.sh > /dev/null <<EOF
+cat > /opt/killbot/apache443.sh <<EOF
 #!/bin/bash
 
 if [ \$# -ne 5 ]; then
@@ -3376,9 +3428,9 @@ echo -e "\$configContent" | sudo tee "\$configFile" > /dev/null
 echo "Configuration for \$domain has been created."
 EOF
 
-sudo chmod +x /opt/killbot/apache443.sh
+chmod +x /opt/killbot/apache443.sh
 
-sudo sudo tee /etc/init.d/kb > /dev/null <<EOF
+cat > /etc/init.d/kb <<EOF
 #!/bin/bash
 #
 # Script for managing killbot
@@ -3403,6 +3455,79 @@ if [ "\$(id -u)" != "0" ]; then
    echo "This script must be run as root." 1>&2
    exit 1
 fi
+set -f
+
+# Domain charset only: letters, digits, hyphen, dot.
+kb_valid_token() {
+    local a="\$1"
+    [ -z "\$a" ] && return 0
+    [ "\${#a}" -gt 253 ] && return 1
+    case "\$a" in
+        *.conf|*.lua|*.sh|*.load) return 1 ;;
+    esac
+    [[ "\$a" =~ ^[A-Za-z0-9.-]+\$ ]]
+}
+
+# Hostname only (letters required). Rejects paths, IPs, and globs.
+kb_valid_domain() {
+    local d="\$1"
+    local label
+    kb_valid_token "\$d" || return 1
+    if [ -z "\$d" ] || [ "\${#d}" -gt 253 ]; then
+        return 1
+    fi
+    case "\$d" in
+        *..*|.*|*.|*-.*|*.conf|*.lua) return 1 ;;
+    esac
+    if [[ ! "\$d" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\$ ]]; then
+        return 1
+    fi
+    if [[ ! "\$d" =~ [A-Za-z] ]]; then
+        return 1
+    fi
+    local IFS='.'
+    for label in \$d; do
+        [ -z "\$label" ] && return 1
+        [ "\${#label}" -gt 63 ] && return 1
+        case "\$label" in
+            -*|*-) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+kb_require_domain() {
+    if ! kb_valid_domain "\$1"; then
+        echo "Invalid domain." 1>&2
+        exit 1
+    fi
+}
+
+# One domain only. "kb remove *" must not wipe every vhost after the
+# caller shell expands * to a list of config files.
+kb_require_one_domain() {
+    if [ "\$#" -ne 2 ]; then
+        echo "Usage: \$0 \$1 domain" 1>&2
+        echo "Exactly one domain is required. Wildcards are not allowed." 1>&2
+        exit 1
+    fi
+    kb_require_domain "\$2"
+}
+
+kb_require_no_args() {
+    if [ "\$#" -ne 1 ]; then
+        echo "Usage: \$0 \$1" 1>&2
+        exit 1
+    fi
+}
+
+kb_require_ensite_opt() {
+    [ -z "\$1" ] && return 0
+    if [ "\$1" != "p" ]; then
+        echo "Invalid ensite option." 1>&2
+        exit 1
+    fi
+}
 
 # Function to check Apache and Nginx configuration
 check_apache_config() {
@@ -3866,6 +3991,8 @@ status() {
         echo "Error: could not determine the server IP."
         failed=1
     else
+        echo "Waiting 6 seconds before http://\${server_ip}/kb.php..."
+        sleep 6
         http_code=\$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "http://\${server_ip}/kb.php")
         if [ "\$http_code" = "200" ]; then
             echo "http://\${server_ip}/kb.php returned 200."
@@ -3957,55 +4084,48 @@ stop() {
 # Command handling
 case "\$1" in
     reload)
+        kb_require_no_args "\$@"
         reload
         ;;
     ensite)
-        if [ -z "\$2" ]; then
-            echo "Usage: \$0 ensite domain"
+        if [ "\$#" -lt 2 ] || [ "\$#" -gt 3 ]; then
+            echo "Usage: \$0 ensite domain [p]" 1>&2
+            echo "Exactly one domain is required. Wildcards are not allowed." 1>&2
             exit 1
         fi
-        
+        kb_require_domain "\$2"
+        kb_require_ensite_opt "\$3"
         ensite "\$2" "\$3"
         ;;
     dissite)
-        if [ -z "\$2" ]; then
-            echo "Usage: \$0 dissite domain"
-            exit 1
-        fi
+        kb_require_one_domain "\$@"
         dissite "\$2"
         ;;
     cert_del)
-        if [ -z "\$2" ]; then
-            echo "Usage: \$0 cert_del domain"
-            exit 1
-        fi
+        kb_require_one_domain "\$@"
         cert_del "\$2"
         ;;
     a2dissite)
-        if [ -z "\$2" ]; then
-            echo "Usage: \$0 a2dissite domain"
-            exit 1
-        fi
+        kb_require_one_domain "\$@"
         a2dissite_domain "\$2"
         ;;
     remove)
-        if [ -z "\$2" ]; then
-            echo "Usage: \$0 remove domain"
-            exit 1
-        fi
+        kb_require_one_domain "\$@"
         remove_domain "\$2"
         ;;
     status|check)
+        kb_require_no_args "\$@"
         status
         ;;
     start)
+        kb_require_no_args "\$@"
         start
         ;;
     stop)
+        kb_require_no_args "\$@"
         stop
         ;;
     install)
-        
         install "\$2" "\$3" "\$4" "\$5" "\$6" "\$7" "\$8" "\$9" "\${10}" "\${11}" "\${12}" "\${13}" "\${14}" "\${15}" "\${16}" "\${17}" "\${18}" "\${19}" "\${20}" "\${21}" "\${22}" "\${23}" "\${24}" "\${25}" "\${26}" "\${27}" "\${28}" "\${29}" "\${30}"
         ;;
     *)
@@ -4017,13 +4137,13 @@ esac
 exit \$?
 EOF
 
-sudo chmod +x /etc/init.d/kb
+chmod +x /etc/init.d/kb
 
 if [ ! -L "/usr/local/bin/kb" ]; then
-    sudo ln -sf /etc/init.d/kb /usr/local/bin/kb
+    ln -sf /etc/init.d/kb /usr/local/bin/kb
 fi
 
-sudo tee /opt/killbot/install.sh > /dev/null <<EOF
+cat > /opt/killbot/install.sh <<EOF
 #!/bin/bash
 
 require_kb_status() {
@@ -4092,6 +4212,170 @@ echo "DNS server: \$DNS_LE_SERVER"
 
 declare DNSServer="\$DNS_LE_SERVER"
 
+# Domain: letters, digits, hyphen, dot. No quotes, slashes, or globs.
+kb_install_valid_domain() {
+    local d="\$1"
+    local label
+    if [ -z "\$d" ] || [ "\${#d}" -gt 253 ]; then
+        return 1
+    fi
+    case "\$d" in
+        *..*|.*|*.|*.conf|*.lua|*.sh|*.load) return 1 ;;
+    esac
+    if [[ ! "\$d" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\$ ]]; then
+        return 1
+    fi
+    if [[ ! "\$d" =~ [A-Za-z] ]]; then
+        return 1
+    fi
+    local IFS='.'
+    for label in \$d; do
+        [ -z "\$label" ] && return 1
+        [ "\${#label}" -gt 63 ] && return 1
+        case "\$label" in
+            -*|*-) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# Email: local@domain. Local part is letters/digits/._-+ only.
+kb_install_valid_email() {
+    local e="\$1"
+    local user host
+    if [ -z "\$e" ] || [ "\${#e}" -gt 254 ]; then
+        return 1
+    fi
+    case "\$e" in
+        *@*) ;;
+        *) return 1 ;;
+    esac
+    user="\${e%%@*}"
+    host="\${e#*@}"
+    case "\$user" in
+        *@*) return 1 ;;
+    esac
+    case "\$host" in
+        *@*) return 1 ;;
+    esac
+    if [ -z "\$user" ] || [ "\${#user}" -gt 64 ]; then
+        return 1
+    fi
+    [[ "\$user" =~ ^[A-Za-z0-9._+-]+\$ ]] || return 1
+    kb_install_valid_domain "\$host"
+}
+
+kb_install_valid_token() {
+    local t="\$1"
+    [ -z "\$t" ] && return 1
+    [ "\${#t}" -gt 128 ] && return 1
+    [[ "\$t" =~ ^[A-Za-z0-9]+\$ ]]
+}
+
+# IPv4 or localhost (folder install uses localhost as backend).
+kb_install_valid_ip() {
+    local ip="\$1"
+    local o
+    [ "\$ip" = "localhost" ] && return 0
+    [[ "\$ip" =~ ^([0-9]{1,3}\\.){3}[0-9]{1,3}\$ ]] || return 1
+    local IFS='.'
+    for o in \$ip; do
+        [ "\$o" -ge 0 ] && [ "\$o" -le 255 ] || return 1
+    done
+    return 0
+}
+
+# Whitelist item: full IPv4, or prefix "starts with" (77.75. / 77.75.155.).
+kb_install_valid_wlip_item() {
+    local ip="\$1"
+    local o
+    [ -z "\$ip" ] && return 1
+    [ "\${#ip}" -gt 15 ] && return 1
+    if [[ "\$ip" =~ ^([0-9]{1,3}\\.){1,3}\$ ]]; then
+        local IFS='.'
+        for o in \$ip; do
+            [ -z "\$o" ] && continue
+            [ "\$o" -ge 0 ] && [ "\$o" -le 255 ] || return 1
+        done
+        return 0
+    fi
+    kb_install_valid_ip "\$ip"
+}
+
+kb_install_valid_le() {
+    [ "\$1" = "0" ] || [ "\$1" = "1" ] || [ "\$1" = "2" ]
+}
+
+kb_install_valid_www() {
+    [ "\$1" = "-1" ] || [ "\$1" = "0" ] || [ "\$1" = "1" ]
+}
+
+kb_install_valid_https() {
+    [ "\$1" = "http" ] || [ "\$1" = "https" ]
+}
+
+kb_install_valid_cdns() {
+    [ "\$1" = "0" ] || [ "\$1" = "1" ] || [ "\$1" = "2" ]
+}
+
+# Optional http(s):// then the same hostname rules as -d.
+kb_install_valid_cdn() {
+    local c="\$1"
+    local host
+    [ -z "\$c" ] && return 0
+    [ "\${#c}" -gt 300 ] && return 1
+    host="\$c"
+    host="\${host#http://}"
+    host="\${host#https://}"
+    host="\${host%%/*}"
+    kb_install_valid_domain "\$host"
+}
+
+kb_install_valid_path_item() {
+    local p="\$1"
+    [ -z "\$p" ] && return 1
+    [ "\${#p}" -gt 256 ] && return 1
+    case "\$p" in
+        //*|*/../*|*/..|../*|..) return 1 ;;
+    esac
+    # Optional trailing $ = exact path match in lua. Nowhere else.
+    if [[ "\$p" == *\$ ]]; then
+        p="\${p%\$}"
+        [ -z "\$p" ] && return 1
+    fi
+    [[ "\$p" =~ ^/[A-Za-z0-9._/-]*\$ ]]
+}
+
+kb_install_valid_csv() {
+    local list="\$1"
+    local kind="\$2"
+    local item
+    [ -z "\$list" ] && return 0
+    [ "\${#list}" -gt 8192 ] && return 1
+    case "\$list" in
+        ,*|*,|*,,*) return 1 ;;
+    esac
+    local IFS=','
+    for item in \$list; do
+        [ -z "\$item" ] && return 1
+        case "\$kind" in
+            ip)
+                kb_install_valid_wlip_item "\$item" || return 1
+                ;;
+            ua)
+                [[ "\$item" =~ ^[A-Za-z0-9._-]+\$ ]] || return 1
+                ;;
+            path)
+                kb_install_valid_path_item "\$item" || return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+    return 0
+}
+
 while [[ "\$#" -gt 0 ]]; do
     if [[ -z "\$1" ]]; then
         break
@@ -4104,7 +4388,9 @@ while [[ "\$#" -gt 0 ]]; do
         -ip)
             backend_ip="\$2"; shift 2;;
         -f)
-            folder="\$2"; shift 2;;
+            echo "Invalid install argument: -f is not allowed." >&2
+            exit 1
+            ;;
         -cdn)
             cdn_domain="\$2"; shift 2;;
         -cdnp)
@@ -4137,8 +4423,8 @@ if [[ -z "\$email" && -z "\$token" ]]; then
     exit 1
 fi
 
-if [[ -z "\$backend_ip" && -z "\$folder" ]]; then
-    echo "Error: argument ip (-ip) or folder (-f) is required" >&2
+if [[ -z "\$backend_ip" ]]; then
+    echo "Error: argument ip (-ip) is required" >&2
     exit 1
 fi
 
@@ -4147,8 +4433,57 @@ if [[ -z "\$domain" ]]; then
     exit 1
 fi
 
-if [[ "\$domain" =~ ^https?:// ]]; then
-  echo "Error: The domain should not contain http:// or https://. Enter only the website domain (without http(s))"
+if ! kb_install_valid_domain "\$domain"; then
+    echo "Invalid domain." >&2
+    exit 1
+fi
+if [[ -n "\$email" ]] && ! kb_install_valid_email "\$email"; then
+    echo "Invalid email." >&2
+    exit 1
+fi
+if [[ -n "\$token" ]] && ! kb_install_valid_token "\$token"; then
+    echo "Invalid token." >&2
+    exit 1
+fi
+if [[ -n "\$backend_ip" ]] && ! kb_install_valid_ip "\$backend_ip"; then
+    echo "Invalid ip." >&2
+    exit 1
+fi
+if ! kb_install_valid_le "\$le"; then
+    echo "Invalid -le value." >&2
+    exit 1
+fi
+if ! kb_install_valid_www "\$www"; then
+    echo "Invalid -www value." >&2
+    exit 1
+fi
+if ! kb_install_valid_https "\$https"; then
+    echo "Invalid -https value." >&2
+    exit 1
+fi
+if [[ -n "\$cdn_static" ]] && ! kb_install_valid_cdns "\$cdn_static"; then
+    echo "Invalid -cdns value." >&2
+    exit 1
+fi
+if [[ -n "\$cdn_domain" ]] && ! kb_install_valid_cdn "\$cdn_domain"; then
+    echo "Invalid -cdn value." >&2
+    exit 1
+fi
+if [[ -n "\$cdn_paths" ]] && ! kb_install_valid_csv "\$cdn_paths" path; then
+    echo "Invalid -cdnp value." >&2
+    exit 1
+fi
+if ! kb_install_valid_csv "\$wlip" ip; then
+    echo "Invalid -wlip value." >&2
+    exit 1
+fi
+if ! kb_install_valid_csv "\$wlua" ua; then
+    echo "Invalid -wlua value." >&2
+    exit 1
+fi
+if ! kb_install_valid_csv "\$wlpath" path; then
+    echo "Invalid -wlpath value." >&2
+    exit 1
 fi
 
 echo "\$(date '+%F %T') install.sh pid=\$\$ ppid=\$PPID parent=[\$(ps -o args= -p \$PPID 2>/dev/null)] argv=[\$*]" >> /var/log/killbot/install_debug.log
@@ -5092,7 +5427,7 @@ sudo rm -f "${MODSEC_DIR}/killbot-ip.conf" "${MODSEC_DIR}/killbot-bots.conf"
 
 MODSEC_FILE="${MODSEC_DIR}/killbot-slow.conf"
 # Create configuration file to prevent slow connections /etc/modsecurity/killbot-slow.conf
-sudo tee "$MODSEC_FILE" > /dev/null <<EOL
+cat > "$MODSEC_FILE" <<EOL
 # Enable request processing
 SecRuleEngine On
 
@@ -5316,7 +5651,7 @@ echo "Apache log rotation is now configured to keep 3 days of logs"
 sudo systemctl daemon-reexec
 sudo systemctl daemon-reload
 
-sudo tee /var/www/html/kb.php > /dev/null <<EOF
+cat > /var/www/html/kb.php <<EOF
 <?php
 \$allowedIps = [    
     '45.66.116.213',
@@ -5350,7 +5685,7 @@ if (!\$type) {
 }
 
 if (\$type=="v"){
-    echo "3.75"; 
+    echo "3.76"; 
     exit;
 }
 
