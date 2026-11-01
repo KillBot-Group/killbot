@@ -4,6 +4,7 @@
 #
 # Usage:
 #   sudo /opt/killbot/UpdateAll.sh
+#   sudo /opt/killbot/UpdateAll.sh test
 #   sudo /opt/killbot/UpdateAll.sh main
 #   sudo /opt/killbot/UpdateAll.sh latest
 #   sudo /opt/killbot/UpdateAll.sh v3.4
@@ -12,11 +13,12 @@
 set -e
 
 KB_GIT_REPO="${KB_GIT_REPO:-grigoriy-melnikov/KillBot}"
-REF="${1:-main}"
+REF="${1:-test}"
 
 usage() {
-    echo "Usage: $0 [main|latest|TAG|BRANCH|COMMIT]"
-    echo "  (no arg) / main     installer and files from the main branch"
+    echo "Usage: $0 [test|main|latest|TAG|BRANCH|COMMIT]"
+    echo "  (no arg) / test     installer and files from the test branch"
+    echo "  main                installer and files from the main branch"
     echo "  latest              installer from GitHub Releases latest"
     echo "  v3.4                installer from that GitHub Release"
     echo "  BRANCH / COMMIT     installer and files from that git revision"

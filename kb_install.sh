@@ -21,11 +21,11 @@ KILLBOT_SESSION_LIFETIME=86400 #sec
 set -e # Exit immediately if any command fails
 
 # Optional git ref for raw downloads (branch, tag, or commit).
-# UpdateAll.sh passes KB_GIT_REF (default main).
+# UpdateAll.sh passes KB_GIT_REF. Default is the test branch while we debug.
 if [[ -z "${KB_GIT_REF:-}" && -n "${1:-}" && "$1" != -* ]]; then
   KB_GIT_REF="$1"
 fi
-KB_GIT_REF="${KB_GIT_REF:-main}"
+KB_GIT_REF="${KB_GIT_REF:-test}"
 if [[ ! "$KB_GIT_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$KB_GIT_REF" == *..* ]]; then
   echo "ERROR: invalid KB_GIT_REF: ${KB_GIT_REF}"
   exit 1
@@ -1470,6 +1470,46 @@ if [[ -z "${KB_PHP_SERIES:-}" ]]; then
 fi
 kb_php_enable_apache_module "$KB_PHP_SERIES"
 echo "Enabled Apache module: php${KB_PHP_SERIES} (mpm_prefork, only this series)"
+
+# kb.php / le_receive_cert.php run under Apache and call exec/shell_exec/passthru.
+# solver installer may have put those in apache2/php.ini; take them out so both
+# installers can share a host. CLI php.ini is never touched (Lua verification.php).
+kb_php_keep_kb_php_functions() {
+    local ini fn
+    for ini in /etc/php/*/apache2/php.ini; do
+        [ -f "$ini" ] || continue
+        sudo php /dev/stdin "$ini" <<'PHP'
+<?php
+$ini = $argv[1];
+$src = file_get_contents($ini);
+if ($src === false || !preg_match('/^\s*disable_functions\s*=\s*(.*)$/m', $src, $m)) {
+    exit(0);
+}
+$keep = array('exec' => true, 'shell_exec' => true, 'passthru' => true);
+$out = array();
+$removed = array();
+foreach (explode(',', $m[1]) as $fn) {
+    $fn = trim($fn);
+    if ($fn === '') {
+        continue;
+    }
+    if (isset($keep[$fn])) {
+        $removed[] = $fn;
+        continue;
+    }
+    $out[$fn] = true;
+}
+if (!$removed) {
+    exit(0);
+}
+$line = 'disable_functions = ' . implode(',', array_keys($out));
+$src = preg_replace('/^\s*disable_functions\s*=.*$/m', $line, $src, 1);
+file_put_contents($ini, $src);
+fwrite(STDERR, "Enabled in {$ini} for kb.php: " . implode(',', $removed) . "\n");
+PHP
+    done
+}
+kb_php_keep_kb_php_functions
 #####################
 
 # lua-md5 from apt is under 5.1/5.2. Search 5.1-5.4 so require "md5" finds it
@@ -1524,21 +1564,8 @@ sudo chmod 775 /opt/killbot/ssl
 
 echo "  permissions OK: /opt/killbot/ssl (www-data:www-data 775)"
 
-# Shared Killbot backends. Keep existing file (may be customized).
-if [ ! -s /opt/killbot/killbot_revers ]; then
-  cat > /opt/killbot/killbot_revers <<'EOC'
-10052024.ru
-r1.kill-bot.ru
-data.killbot.ru
-r3.nl.kill-bot.ru
-r4.us.kill-bot.ru
-r6.sg.kill-bot.net
-EOC
-  chmod 644 /opt/killbot/killbot_revers
-  echo "Created /opt/killbot/killbot_revers with default Killbot backends"
-else
-  echo "Keeping existing /opt/killbot/killbot_revers"
-fi
+# /opt/killbot/killbot_revers is written after settings.php so
+# $rewrite_killbot_revers_on_install can be read first.
 
 # Create the countries config only if the file is missing
 if [ ! -f /opt/killbot/f2b/block_all_countries_except.config ]; then  
@@ -1600,8 +1627,10 @@ else
     exit 1
 fi
 
+# Never replace an existing settings.php — only create it once, then
+# append missing keys so manually set values stay as they are.
 if [ ! -f /opt/killbot/settings.php ]; then
-sudo tee /opt/killbot/settings.php > /dev/null <<'EOF'
+cat > /opt/killbot/settings.php <<'EOF'
 <?php
 // Local KillBot server settings.
 // Created once at /opt/killbot/settings.php and not overwritten on update.
@@ -1630,13 +1659,17 @@ $kb_le_remove_local_letsencrypt = true;
 // Inline /js/cn.js into verification.html when the file exists on this server.
 // false = browser fetches cn.js over HTTP as before.
 $kb_inline_cn_js = false;
+
+// Rewrite /opt/killbot/killbot_revers (shared backend list) on kb_install.sh.
+// true = replace with the installer default list. false = keep the current file.
+$rewrite_killbot_revers_on_install = true;
 EOF
     echo "Created /opt/killbot/settings.php"
 else
     echo "Keep existing settings: /opt/killbot/settings.php"
 fi
 if [ -f /opt/killbot/settings.php ] && ! grep -q 'kb_inline_cn_js' /opt/killbot/settings.php; then
-sudo tee -a /opt/killbot/settings.php > /dev/null <<'EOF'
+cat >> /opt/killbot/settings.php <<'EOF'
 
 // Inline /js/cn.js into verification.html when the file exists on this server.
 // false = browser fetches cn.js over HTTP as before.
@@ -1644,8 +1677,44 @@ $kb_inline_cn_js = false;
 EOF
     echo "Added kb_inline_cn_js to /opt/killbot/settings.php"
 fi
-sudo chown root:root /opt/killbot/settings.php
-sudo chmod 644 /opt/killbot/settings.php
+if [ -f /opt/killbot/settings.php ] && ! grep -q 'rewrite_killbot_revers_on_install' /opt/killbot/settings.php; then
+cat >> /opt/killbot/settings.php <<'EOF'
+
+// Rewrite /opt/killbot/killbot_revers (shared backend list) on kb_install.sh.
+// true = replace with the installer default list. false = keep the current file.
+$rewrite_killbot_revers_on_install = true;
+EOF
+    echo "Added rewrite_killbot_revers_on_install to /opt/killbot/settings.php"
+fi
+chown root:root /opt/killbot/settings.php
+chmod 644 /opt/killbot/settings.php
+
+# Shared Killbot backends. Default: overwrite on every kb_install.sh.
+# Set $rewrite_killbot_revers_on_install = false in settings.php to keep
+# a hand-edited list. A missing file is always created.
+kb_write_killbot_revers=1
+if [ -f /opt/killbot/settings.php ]; then
+    kb_flag="$(php -d display_errors=0 -r 'include "/opt/killbot/settings.php"; if (!isset($rewrite_killbot_revers_on_install)) { echo "1"; } else { echo empty($rewrite_killbot_revers_on_install) ? "0" : "1"; }' 2>/dev/null || echo 1)"
+    kb_flag="${kb_flag//$'\r'/}"
+    kb_flag="${kb_flag##*$'\n'}"
+    if [ "$kb_flag" = "0" ]; then
+        kb_write_killbot_revers=0
+    fi
+fi
+if [ "$kb_write_killbot_revers" = "0" ] && [ -s /opt/killbot/killbot_revers ]; then
+    echo "Keeping existing /opt/killbot/killbot_revers (rewrite_killbot_revers_on_install = false)"
+else
+    cat > /opt/killbot/killbot_revers <<'EOC'
+10052024.ru
+r1.kill-bot.ru
+data.killbot.ru
+r3.nl.kill-bot.ru
+r4.us.kill-bot.ru
+r6.sg.kill-bot.net
+EOC
+    chmod 644 /opt/killbot/killbot_revers
+    echo "Wrote /opt/killbot/killbot_revers with default Killbot backends"
+fi
 
 FILE="/var/www/html/empty.php"
     kb_download "$FILE" "html/empty_nginx.html"
@@ -2468,11 +2537,11 @@ end
     local is_real_bot = check_hostname(hostname, user_agent, remote_addr_org)
     
     if is_real_bot == "bot_false" then
-        local result = run_php_cli("/opt/killbot/html/FakeBot.php", x_forwarded_for, remote_addr_org, user_agent, http_host)
+        local result = run_php_cli("/opt/killbot/html/verification.php", x_forwarded_for, remote_addr_org, user_agent, http_host)
         r.content_type = "text/html"
         r:puts(result)
 
-        log_message("ip:"  .. remote_addr_org .. " fake bot detected: " .. user_agent .. " fake bot page showed DONE",http_host)
+        log_message("ip:"  .. remote_addr_org .. " fake bot UA without matching rDNS: " .. user_agent .. " VP showed DONE",http_host)
 
         return apache2.DONE
     end
@@ -5685,7 +5754,7 @@ if (!\$type) {
 }
 
 if (\$type=="v"){
-    echo "3.76"; 
+    echo "3.77"; 
     exit;
 }
 
